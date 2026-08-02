@@ -1,1 +1,23 @@
 .venv/
+venv/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local deployment configuration.
+# Host addresses, usernames and SSH key paths live here and must never be
+# committed. Copy deploy.sh.example to deploy.local.sh and fill it in.
+deploy.local.sh
+*.local.sh
+.env
+.env.*
+!.env.example
+
+# Editor/agent local state
+.claude/settings.local.json
+
+# Tool output
+sourcemapper_out/
+*.log
+server.pid
+server.log

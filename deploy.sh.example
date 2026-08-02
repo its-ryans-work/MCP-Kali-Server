@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+#
+# Deployment helper template.
+#
+# Copy to deploy.local.sh (gitignored) and fill in your own host details:
+#
+#   cp deploy.sh.example deploy.local.sh
+#   chmod +x deploy.local.sh
+#   ./deploy.local.sh install
+#
+# Never commit deploy.local.sh — it holds the address of your Kali host and the
+# path to your SSH key.
+#
+set -euo pipefail
+
+# ------------------------------------------------------------------ settings
+
+KALI_HOST="${KALI_HOST:-kali.example.internal}"   # hostname or IP of the Kali box
+KALI_USER="${KALI_USER:-kali}"                    # ssh user
+KALI_KEY="${KALI_KEY:-$HOME/.ssh/id_ed25519}"     # ssh private key
+REMOTE_DIR="${REMOTE_DIR:-\$HOME/mcp-kali-server}" # install path on the Kali box
+# Port 5000 is a common default for other services (ASP.NET Core/Kestrel binds it
+# out of the box), so pick something unlikely to collide.
+API_PORT="${API_PORT:-5111}"
+BIND_IP="${BIND_IP:-127.0.0.1}"                   # 0.0.0.0 exposes the API to the network
+
+# ----------------------------------------------------------------- internals
+
+SSH_OPTS=(-o StrictHostKeyChecking=accept-new -i "$KALI_KEY")
+REMOTE="$KALI_USER@$KALI_HOST"
+LOCAL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+kssh()  { ssh "${SSH_OPTS[@]}" "$REMOTE" "$@"; }
+ksync() {
+    # server.pid and server.log are remote runtime state and do not exist
+    # locally, so --delete would wipe them and orphan a running server.
+    rsync -az --delete \
+        --exclude '.git' --exclude '.venv' --exclude '__pycache__' \
+        --exclude '*.local.sh' --exclude '.claude' \
+        --exclude 'server.pid' --exclude 'server.log' \
+        -e "ssh ${SSH_OPTS[*]}" "$LOCAL_DIR/" "$REMOTE:$REMOTE_DIR/"
+}
+
+usage() {
+    cat <<EOF
+usage: $(basename "$0") <command>
+
+  sync      copy this repo to the Kali host
+  install   sync, then run install-tools.sh there
+  check     report which tools are installed on the Kali host
+  start     start the API server (background, logs to \$REMOTE_DIR/server.log)
+  stop      stop the API server
+  status    show whether the API server is up, and its health payload
+  logs      tail the server log
+  shell     open an interactive ssh session
+EOF
+}
+
+case "${1:-}" in
+    sync)
+        ksync && echo "synced to $REMOTE:$REMOTE_DIR"
+        ;;
+    install)
+        ksync
+        kssh "cd $REMOTE_DIR && chmod +x install-tools.sh && ./install-tools.sh"
+        ;;
+    check)
+        kssh "cd $REMOTE_DIR && ./install-tools.sh --check"
+        ;;
+    # A pidfile rather than pgrep: the ssh command line itself contains
+    # "server.py", so a pgrep -f pattern matches the very shell running the
+    # check and always reports a false positive.
+    start)
+        kssh "cd $REMOTE_DIR && \
+            if [ -s server.pid ] && kill -0 \"\$(cat server.pid)\" 2>/dev/null; then \
+                echo \"already running (pid \$(cat server.pid))\"; \
+            else \
+                nohup python3 server.py --ip $BIND_IP --port $API_PORT > server.log 2>&1 & \
+                echo \$! > server.pid; \
+                sleep 2; \
+                if kill -0 \"\$(cat server.pid)\" 2>/dev/null; then \
+                    echo \"started (pid \$(cat server.pid)) on $BIND_IP:$API_PORT\"; \
+                else \
+                    echo 'failed to start; last log lines:'; tail -20 server.log; rm -f server.pid; exit 1; \
+                fi; \
+            fi"
+        ;;
+    stop)
+        kssh "cd $REMOTE_DIR && \
+            if [ -s server.pid ] && kill \"\$(cat server.pid)\" 2>/dev/null; then \
+                rm -f server.pid; echo stopped; \
+            else \
+                rm -f server.pid; echo 'not running'; \
+            fi"
+        ;;
+    status)
+        kssh "cd $REMOTE_DIR && \
+            if [ -s server.pid ] && kill -0 \"\$(cat server.pid)\" 2>/dev/null; then \
+                echo \"running (pid \$(cat server.pid))\"; \
+            else \
+                echo 'server not running'; \
+            fi; \
+            curl -s -m 10 http://127.0.0.1:$API_PORT/health || true"
+        ;;
+    logs)
+        kssh "tail -f $REMOTE_DIR/server.log"
+        ;;
+    shell)
+        ssh "${SSH_OPTS[@]}" "$REMOTE"
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac

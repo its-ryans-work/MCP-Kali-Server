@@ -5,10 +5,10 @@
         "args": [
           "/absolute/path/to/client.py",
           "--server",
-          "http://LINUX_IP:5000/"
+          "http://LINUX_IP:5111/"
         ],
         "description": "MCP Kali Server",
-        "timeout": 300,
+        "timeout": 600,
         "alwaysAllow": []
     }
   }

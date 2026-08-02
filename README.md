@@ -18,6 +18,86 @@ This MCP is able to run terminal commands as well as interacting with web applic
 
 As a result, this is able to perform **AI-assisted penetration testing** and solving **CTF challenges** in real time.
 
+> This is a fork of [Wh0am123/MCP-Kali-Server](https://github.com/Wh0am123/MCP-Kali-Server) that adds
+> the web/appsec toolchain listed below, a provisioning script, and a deployment helper.
+
+## 🧰 Added Tooling
+
+This fork adds eleven tools on top of upstream. Each has a dedicated API endpoint and MCP tool with
+typed parameters, so the model does not have to build command lines by hand.
+
+| Tool | MCP tool | What it covers |
+|---|---|---|
+| [SQLMap](https://github.com/sqlmapproject/sqlmap) | `sqlmap_scan` | SQL injection; upstream's endpoint extended with enumeration flags (`dbs`/`tables`/`columns`/`dump`), tamper scripts, level/risk and proxying |
+| [ffuf](https://github.com/ffuf/ffuf) | `ffuf_fuzz` | Content, vhost and parameter fuzzing with the full matcher/filter set |
+| [shcheck](https://github.com/santoru/shcheck) | `shcheck_headers` | HTTP security header presence and gaps |
+| [JS Analyzer](https://github.com/jenish-sojitra/JSAnalyzer) | `js_analyze` | Endpoints, URLs, secrets, emails, file refs and sourcemap links in JavaScript |
+| [sourcemapper](https://github.com/denandz/sourcemapper) | `sourcemapper_extract` | Recovers original source trees from `.js.map` files |
+| [TruffleHog](https://github.com/trufflesecurity/trufflehog) | `trufflehog_scan` | Live-verified credential discovery across git, filesystem, S3, Docker and more |
+| [Semgrep](https://github.com/semgrep/semgrep) | `semgrep_scan` | Static analysis with registry rulepacks or local rules |
+| [ysoserial](https://github.com/frohoff/ysoserial) | `ysoserial_generate` | Java deserialization payloads |
+| [ysoserial.net](https://github.com/pwntester/ysoserial.net) | `ysoserial_net_generate` | .NET deserialization payloads (gadget + formatter) |
+| [Nuclei](https://github.com/projectdiscovery/nuclei) | `nuclei_scan` | Template-driven vulnerability scanning |
+| [sslscan](https://github.com/rbsec/sslscan) | `sslscan_scan` | TLS versions, ciphers, certificates and known weaknesses |
+
+These chain naturally — for example `js_analyze` surfaces a `sourceMappingURL`, `sourcemapper_extract`
+recovers the original source, and `semgrep_scan` or `trufflehog_scan` then runs over the recovered tree.
+
+### Notes on two of them
+
+**JS Analyzer** is upstream a Burp Suite extension (Jython + Swing) with no CLI, so it cannot be shelled
+out to. This fork ships a headless port at [`tools/jsanalyzer.py`](tools/jsanalyzer.py) that reuses its
+detection tables and noise filters, and adds URL/directory input, JSON output and concurrent fetching.
+Two upstream secret patterns match any 32-character hex or alphanumeric run — which fires on every
+webpack chunk hash — so they are gated behind `include_low_confidence`.
+
+**ysoserial payloads are binary**, not text: a Java payload begins with the bytes `AC ED 00 05` and is not
+valid UTF-8. Both payload endpoints therefore return `stdout_base64` (with a `stdout_bytes` length)
+rather than `stdout`. Decode before sending onward.
+
+## 📦 Installing the tools
+
+`install-tools.sh` provisions everything on the Kali host. It is idempotent, architecture-aware
+(amd64/arm64), and installs to `~/.local` so the common case needs no root at all — only tools that must
+come from apt will ask for sudo, and those degrade to a printed instruction rather than failing the run.
+
+```bash
+./install-tools.sh              # install whatever is missing
+./install-tools.sh --check      # report status, change nothing
+./install-tools.sh --only ffuf,nuclei
+./install-tools.sh --skip ysoserial-net
+./install-tools.sh --force      # reinstall even if present
+```
+
+`server.py` adds `~/.local/bin` and the Go bin directory to `PATH` at startup, so tools installed this way
+resolve even when the server runs from systemd or a non-login shell. `GET /health` reports which of the
+extended tools are actually usable — including runtime dependencies, so `ysoserial_net` reads as
+unavailable when Mono is missing rather than merely because a wrapper script exists.
+
+**ysoserial.net requires Mono**, which only apt can provide:
+
+```bash
+sudo apt-get install -y mono-runtime libmono-system-runtime4.0-cil
+```
+
+## 🚀 Deploying to a remote Kali host
+
+`deploy.sh.example` is a template for syncing this repo to a Kali box and managing the API server there.
+Copy it to `deploy.local.sh` — which is gitignored, so your host address and SSH key path never reach the
+repository — and fill in your own values:
+
+```bash
+cp deploy.sh.example deploy.local.sh
+chmod +x deploy.local.sh
+$EDITOR deploy.local.sh          # set KALI_HOST, KALI_USER, KALI_KEY
+./deploy.local.sh install        # sync, then provision tools
+./deploy.local.sh start          # start the API server
+./deploy.local.sh status         # health check
+```
+
+> The default API port here is **5111**, not upstream's 5000. ASP.NET Core/Kestrel binds 5000 by default,
+> so that port is frequently already taken on a developer machine.
+
 ## Articles Using This Tool
 
 [![How MCP is Revolutionizing Offensive Security](https://miro.medium.com/v2/resize:fit:828/format:webp/1*g4h-mIpPEHpq_H63W7Emsg.png)](https://yousofnahya.medium.com/how-mcp-is-revolutionizing-offensive-security-93b2442a5096)
