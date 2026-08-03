@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#
+# mcp-kali-server — start/stop/inspect the Kali Tools API server.
+#
+# The server is always started detached, so it outlives whatever launched it:
+# closing the terminal this ran in does not kill it. State lives in a pidfile
+# next to the repo rather than being discovered with pgrep, because a pattern
+# match on "server.py" also matches the shell running the check.
+#
+# Usage: mcp-kali-server {start|stop|restart|status|logs|launch}
+#
+set -uo pipefail
+
+# Resolved at install time by install-desktop-launcher.sh; falls back to the
+# repo this script was copied from.
+SERVER_DIR="${MKS_SERVER_DIR:-__SERVER_DIR__}"
+BIND_IP="${MKS_BIND_IP:-127.0.0.1}"
+API_PORT="${MKS_API_PORT:-5111}"
+
+PIDFILE="$SERVER_DIR/server.pid"
+LOGFILE="$SERVER_DIR/server.log"
+
+if [ -t 1 ]; then
+    C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'
+    C_RED=$'\033[31m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+else
+    C_RESET=""; C_BOLD=""; C_DIM=""; C_RED=""; C_GREEN=""; C_YELLOW=""
+fi
+ok()   { printf '%s✓%s %s\n' "$C_GREEN"  "$C_RESET" "$*"; }
+warn() { printf '%s!%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; }
+err()  { printf '%s✗%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; }
+
+running() {
+    [ -s "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+}
+
+port_owner() {
+    ss -tlnpH "sport = :$API_PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -1 | cut -d= -f2
+}
+
+do_start() {
+    if running; then
+        ok "already running (pid $(cat "$PIDFILE")) on $BIND_IP:$API_PORT"
+        return 0
+    fi
+
+    # A stale pidfile plus a live listener means something else holds the port —
+    # usually an earlier instance orphaned by a sync that deleted the pidfile.
+    local owner; owner="$(port_owner)"
+    if [ -n "$owner" ]; then
+        warn "port $API_PORT already held by pid $owner (not tracked by this script)"
+        printf '  adopt it with:  echo %s > %s\n' "$owner" "$PIDFILE"
+        printf '  or free it with: kill %s\n' "$owner"
+        return 1
+    fi
+
+    cd "$SERVER_DIR" || { err "server dir not found: $SERVER_DIR"; return 1; }
+
+    # setsid detaches from this terminal's session so the server survives the
+    # window closing, which a bare & does not guarantee.
+    setsid nohup python3 server.py --ip "$BIND_IP" --port "$API_PORT" \
+        >> "$LOGFILE" 2>&1 < /dev/null &
+    echo $! > "$PIDFILE"
+
+    sleep 2
+    if running; then
+        ok "started (pid $(cat "$PIDFILE")) on $BIND_IP:$API_PORT"
+    else
+        err "failed to start — last log lines:"
+        tail -n 20 "$LOGFILE" 2>/dev/null | sed 's/^/    /'
+        rm -f "$PIDFILE"
+        return 1
+    fi
+}
+
+do_stop() {
+    if ! running; then
+        rm -f "$PIDFILE"
+        warn "not running"
+        return 0
+    fi
+    local pid; pid="$(cat "$PIDFILE")"
+    kill "$pid" 2>/dev/null
+    for _ in $(seq 1 10); do
+        running || break
+        sleep 0.5
+    done
+    if running; then
+        warn "did not exit on TERM; sending KILL"
+        kill -9 "$pid" 2>/dev/null
+    fi
+    rm -f "$PIDFILE"
+    ok "stopped (pid $pid)"
+}
+
+do_status() {
+    if running; then
+        ok "running (pid $(cat "$PIDFILE")) on $BIND_IP:$API_PORT"
+    else
+        local owner; owner="$(port_owner)"
+        if [ -n "$owner" ]; then
+            warn "not tracked here, but pid $owner holds port $API_PORT"
+        else
+            err "not running"
+            return 1
+        fi
+    fi
+
+    local health
+    health="$(curl -s -m 10 "http://127.0.0.1:$API_PORT/health" 2>/dev/null)"
+    if [ -z "$health" ]; then
+        warn "health endpoint did not respond"
+        return 1
+    fi
+    python3 - "$health" <<'PY' 2>/dev/null || echo "  $health"
+import json, sys
+d = json.loads(sys.argv[1])
+ext = d.get("extended_tools_status", {})
+avail = sum(1 for v in ext.values() if v)
+print(f"  status: {d.get('status')}   tools: {avail}/{len(ext)} available")
+missing = d.get("missing_extended_tools") or []
+if missing:
+    print("  missing: " + ", ".join(missing))
+PY
+}
+
+# What the desktop launcher runs: bring it up, show state, then follow the log.
+do_launch() {
+    printf '%sMCP Kali Server%s  —  %s\n\n' "$C_BOLD" "$C_RESET" "$SERVER_DIR"
+    do_start || { printf '\n'; read -r -p "Press Enter to close..." _; return 1; }
+    printf '\n'
+    do_status
+    printf '\n%sFollowing %s — closing this window leaves the server running.%s\n' \
+        "$C_DIM" "$LOGFILE" "$C_RESET"
+    printf '%sCtrl-C to stop following (not the server).%s\n\n' "$C_DIM" "$C_RESET"
+    touch "$LOGFILE"
+    tail -n 15 -f "$LOGFILE"
+}
+
+case "${1:-status}" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart) do_stop; do_start ;;
+    status)  do_status ;;
+    logs)    touch "$LOGFILE"; tail -n 50 -f "$LOGFILE" ;;
+    launch)  do_launch ;;
+    *)
+        printf 'usage: %s {start|stop|restart|status|logs|launch}\n' "$(basename "$0")" >&2
+        exit 2
+        ;;
+esac

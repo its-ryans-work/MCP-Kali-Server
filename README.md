@@ -137,6 +137,35 @@ $EDITOR deploy.local.sh          # set KALI_HOST, KALI_USER, KALI_KEY
 > The default API port here is **5111**, not upstream's 5000. ASP.NET Core/Kestrel binds 5000 by default,
 > so that port is frequently already taken on a developer machine.
 
+## 🖥️ Desktop launcher
+
+To start the server from the Kali desktop rather than a shell, run this **on the Kali host**:
+
+```bash
+./install-desktop-launcher.sh
+```
+
+It installs a control script to `~/.local/bin/mcp-kali-server` and a launcher to both the desktop and
+the application menu (right-click it for **Show status** / **Stop server**). Paths are resolved at
+install time, so nothing host-specific is committed. Remove it with `--uninstall`.
+
+The control script works standalone too:
+
+```bash
+mcp-kali-server {start|stop|restart|status|logs}
+```
+
+`status` prints the pid and how many tools the health endpoint reports as usable. The server is
+started with `setsid`, so it keeps running after the launching terminal closes — the window only
+follows the log, and closing it does not stop the server.
+
+Two details that matter on GNOME: a `.desktop` file dropped on the desktop shows as "Untrusted
+application launcher" until `metadata::trusted` is set, which the installer does; and the entry lists
+a single main category, because listing several makes it appear repeatedly in the application menu.
+
+This is a login-time convenience, not a service manager — nothing here starts the server at boot. If
+you want that, a user systemd unit with `WantedBy=default.target` is the better tool.
+
 ## Articles Using This Tool
 
 [![How MCP is Revolutionizing Offensive Security](https://miro.medium.com/v2/resize:fit:828/format:webp/1*g4h-mIpPEHpq_H63W7Emsg.png)](https://yousofnahya.medium.com/how-mcp-is-revolutionizing-offensive-security-93b2442a5096)
