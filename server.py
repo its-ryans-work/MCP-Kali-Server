@@ -476,10 +476,20 @@ def gobuster():
         
         command = ["gobuster", mode, "-u", url, "-w", wordlist]
 
+        # Soft-404 handling. Gobuster has no autocalibration equivalent to ffuf's
+        # -ac, so a host answering 200 for every path has to be filtered by
+        # response length instead.
+        if params.get("exclude_length"):
+            command += ["--exclude-length", str(params["exclude_length"])]
+        if params.get("status_codes"):
+            command += ["-s", str(params["status_codes"])]
+        if params.get("status_codes_blacklist"):
+            command += ["-b", str(params["status_codes_blacklist"])]
+
         if additional_args:
             command += shlex.split(additional_args)
-        
-        result = execute_command(command)
+
+        result = execute_command(command, timeout=params.get("timeout"))
         return jsonify(result)
     except Exception as e:
         logger.error(f"Error in gobuster endpoint: {str(e)}")
@@ -646,6 +656,20 @@ def ffuf(params):
         command += ["-fl", params["filter_lines"]]
     if params.get("filter_regex"):
         command += ["-fr", params["filter_regex"]]
+
+    # Autocalibration: ffuf requests known-bogus paths first and derives filters
+    # from the responses. This is the reliable answer to a host that returns 200
+    # for everything, where fixed filters would let thousands of soft-404s through.
+    if params.get("auto_calibrate") or params.get("auto_calibrate_strategy") or params.get("auto_calibrate_per_host"):
+        command.append("-ac")
+    if params.get("auto_calibrate_per_host"):
+        command.append("-ach")
+    if params.get("auto_calibrate_strategy"):
+        strategy = params["auto_calibrate_strategy"]
+        for entry in ([strategy] if isinstance(strategy, str) else strategy):
+            if not re.match(r'^[a-z0-9_.-]+$', entry):
+                raise ValueError(f"invalid auto-calibration strategy: {entry}")
+            command += ["-acs", entry]
 
     # Non-interactive, machine-readable defaults.
     command += ["-s"] if params.get("silent") else []
