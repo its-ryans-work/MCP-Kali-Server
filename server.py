@@ -701,6 +701,55 @@ def jsanalyzer(params):
     return command
 
 
+@app.route("/api/tools/webcapture", methods=["POST"])
+@tool_endpoint("webcapture", required_params=["url"],
+               install_hint="Provided by this repo; run install-tools.sh --only webcapture.")
+def webcapture(params):
+    """Render a URL in headless Chromium and capture recon data."""
+    command = ["webcapture", params["url"]]
+
+    if params.get("browser"):
+        browser = params["browser"]
+        if browser not in ("chromium", "firefox", "webkit"):
+            raise ValueError("browser must be chromium, firefox, or webkit")
+        command += ["--browser", browser]
+    if params.get("capture"):
+        capture = params["capture"]
+        command += ["--capture", capture if isinstance(capture, str) else ",".join(capture)]
+    if params.get("wait_until"):
+        wait_until = params["wait_until"]
+        if wait_until not in ("load", "domcontentloaded", "networkidle", "commit"):
+            raise ValueError("wait_until must be load, domcontentloaded, networkidle, or commit")
+        command += ["--wait-until", wait_until]
+    if params.get("wait_ms"):
+        command += ["--wait-ms", str(int(params["wait_ms"]))]
+    if params.get("nav_timeout"):
+        command += ["--timeout", str(int(params["nav_timeout"]))]
+    for header in params.get("headers", []) or []:
+        command += ["-H", header]
+    if params.get("cookie"):
+        command += ["--cookie", params["cookie"]]
+    if params.get("user_agent"):
+        command += ["--user-agent", params["user_agent"]]
+    if params.get("viewport"):
+        command += ["--viewport", params["viewport"]]
+    if params.get("proxy"):
+        command += ["--proxy", params["proxy"]]
+    if params.get("insecure"):
+        command.append("--insecure")
+    if params.get("full_page"):
+        command.append("--full-page")
+    if params.get("exec_js"):
+        command += ["--exec-js", params["exec_js"]]
+    if params.get("max_dom_bytes") is not None:
+        command += ["--max-dom-bytes", str(int(params["max_dom_bytes"]))]
+    if params.get("max_requests"):
+        command += ["--max-requests", str(int(params["max_requests"]))]
+
+    # A browser launch plus network idle regularly exceeds the default timeout.
+    return add_args(command, params.get("additional_args", "")), {"timeout": 300}
+
+
 @app.route("/api/tools/sourcemapper", methods=["POST"])
 @tool_endpoint("sourcemapper",
                install_hint="Install with: go install github.com/denandz/sourcemapper@latest.")
@@ -1184,6 +1233,7 @@ EXTENDED_TOOLS = {
     "ysoserial_net": "ysoserial-net",
     "nuclei": "nuclei",
     "sslscan": "sslscan",
+    "webcapture": "webcapture",
 }
 
 

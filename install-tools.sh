@@ -23,7 +23,7 @@ OPT_DIR="$PREFIX/opt/mcp-kali"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-ALL_TOOLS=(sqlmap ffuf shcheck jsanalyzer sourcemapper trufflehog semgrep ysoserial ysoserial-net nuclei sslscan)
+ALL_TOOLS=(sqlmap ffuf shcheck jsanalyzer sourcemapper trufflehog semgrep ysoserial ysoserial-net nuclei sslscan webcapture)
 ONLY=""
 SKIP=""
 CHECK_ONLY=0
@@ -235,6 +235,54 @@ install_jsanalyzer() {
     RESULTS[jsanalyzer]="installed $BIN_DIR/jsanalyzer"
 }
 
+install_webcapture() {
+    # Playwright needs a venv of its own rather than the distro package.
+    # Debian/Kali ship python3-playwright as a "+ds" build with the bundled Node
+    # driver stripped: it shells out to /usr/share/nodejs/playwright/cli.js from
+    # the separate node-playwright package, which is pinned several major
+    # versions behind (1.38 vs 1.55 at time of writing) and cannot drive it. A
+    # PyPI install keeps the client and its driver in lockstep.
+    local src venv
+    src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tools/webcapture.py"
+    venv="$OPT_DIR/playwright-venv"
+
+    if [ ! -f "$src" ]; then
+        RESULTS[webcapture]="FAILED   tools/webcapture.py not found next to this script"
+        err "tools/webcapture.py missing"
+        return 0
+    fi
+
+    if [ -x "$venv/bin/python" ] && "$venv/bin/python" -c "import playwright" 2>/dev/null && [ "$FORCE" -eq 0 ]; then
+        log "playwright venv already present"
+    else
+        log "creating playwright venv (this downloads a browser build; several hundred MB)"
+        rm -rf "$venv"
+        if ! python3 -m venv "$venv" >/dev/null 2>&1; then
+            RESULTS[webcapture]="FAILED   could not create venv (need python3-venv)"
+            err "python3 -m venv failed; install python3-venv"
+            return 0
+        fi
+        "$venv/bin/pip" install -q --upgrade pip >/dev/null 2>&1 || true
+        if ! "$venv/bin/pip" install -q playwright >/dev/null 2>&1; then
+            RESULTS[webcapture]="FAILED   pip install playwright failed"
+            err "pip install playwright failed"
+            return 0
+        fi
+        # Browsers land in ~/.cache/ms-playwright and are reused across venvs.
+        if ! "$venv/bin/playwright" install chromium >/dev/null 2>&1; then
+            RESULTS[webcapture]="PARTIAL  venv built but browser download failed; run: $venv/bin/playwright install chromium"
+            warn "playwright browser download failed"
+            install -m 0755 "$src" "$OPT_DIR/webcapture.py"
+            write_wrapper webcapture "'$venv/bin/python' '$OPT_DIR/webcapture.py'"
+            return 0
+        fi
+    fi
+
+    install -m 0755 "$src" "$OPT_DIR/webcapture.py"
+    write_wrapper webcapture "'$venv/bin/python' '$OPT_DIR/webcapture.py'"
+    RESULTS[webcapture]="installed $BIN_DIR/webcapture"
+}
+
 install_sourcemapper() {
     if installed sourcemapper && [ "$FORCE" -eq 0 ]; then
         RESULTS[sourcemapper]="present  $(command -v sourcemapper 2>/dev/null || echo "$(go env GOPATH)/bin/sourcemapper")"
@@ -439,6 +487,7 @@ main() {
             ysoserial-net) install_ysoserial_net ;;
             nuclei)       install_nuclei ;;
             sslscan)      install_sslscan ;;
+            webcapture)   install_webcapture ;;
         esac
     done
 

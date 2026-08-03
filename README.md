@@ -23,7 +23,7 @@ As a result, this is able to perform **AI-assisted penetration testing** and sol
 
 ## 🧰 Added Tooling
 
-This fork adds eleven tools on top of upstream. Each has a dedicated API endpoint and MCP tool with
+This fork adds twelve tools on top of upstream. Each has a dedicated API endpoint and MCP tool with
 typed parameters, so the model does not have to build command lines by hand.
 
 | Tool | MCP tool | What it covers |
@@ -39,11 +39,19 @@ typed parameters, so the model does not have to build command lines by hand.
 | [ysoserial.net](https://github.com/pwntester/ysoserial.net) | `ysoserial_net_generate` | .NET deserialization payloads (gadget + formatter) |
 | [Nuclei](https://github.com/projectdiscovery/nuclei) | `nuclei_scan` | Template-driven vulnerability scanning |
 | [sslscan](https://github.com/rbsec/sslscan) | `sslscan_scan` | TLS versions, ciphers, certificates and known weaknesses |
+| [Playwright](https://github.com/microsoft/playwright) | `web_capture` | Renders a page in real Chromium: post-JS DOM, network log, loaded scripts, console, cookie flags, storage, screenshot |
 
-These chain naturally — for example `js_analyze` surfaces a `sourceMappingURL`, `sourcemapper_extract`
-recovers the original source, and `semgrep_scan` or `trufflehog_scan` then runs over the recovered tree.
+These chain naturally. A typical run on a single-page app:
 
-### Notes on two of them
+```
+web_capture (wait_until=networkidle)   -> discovers dynamically injected bundles that
+                                          are absent from the served HTML
+  -> js_analyze on those script URLs   -> endpoints, secrets, sourceMappingURL
+  -> sourcemapper_extract              -> original pre-minification source tree
+  -> semgrep_scan / trufflehog_scan    -> vulnerabilities and credentials in that source
+```
+
+### Notes on three of them
 
 **JS Analyzer** is upstream a Burp Suite extension (Jython + Swing) with no CLI, so it cannot be shelled
 out to. This fork ships a headless port at [`tools/jsanalyzer.py`](tools/jsanalyzer.py) that reuses its
@@ -54,6 +62,13 @@ webpack chunk hash — so they are gated behind `include_low_confidence`.
 **ysoserial payloads are binary**, not text: a Java payload begins with the bytes `AC ED 00 05` and is not
 valid UTF-8. Both payload endpoints therefore return `stdout_base64` (with a `stdout_bytes` length)
 rather than `stdout`. Decode before sending onward.
+
+**Playwright is installed into its own venv**, not from apt. Kali packages `python3-playwright` as a `+ds`
+build with the bundled Node driver removed — it expects `/usr/share/nodejs/playwright/cli.js` from the
+separate `node-playwright` package, which is pinned several major versions behind (1.38 against 1.55) and
+cannot drive it. `install-tools.sh` therefore builds a dedicated venv from PyPI so client and driver stay
+in lockstep, and publishes a `webcapture` wrapper on `PATH`. Browser builds live in the shared
+`~/.cache/ms-playwright` and are reused.
 
 ## 📦 Installing the tools
 
@@ -79,6 +94,18 @@ unavailable when Mono is missing rather than merely because a wrapper script exi
 ```bash
 sudo apt-get install -y mono-runtime libmono-system-runtime4.0-cil
 ```
+
+Mono runs ysoserial.net but does not make every gadget usable. Mono never implemented WPF, so gadgets
+needing `PresentationCore` or `PresentationFramework` — `ObjectDataProvider`, `WindowsIdentity`,
+`AxHostState`, `DataSet` — fail with a missing-assembly error on any Linux host, and plain
+`TypeConfuseDelegate` throws a `NullReferenceException`, which is why the build ships a Mono variant.
+Verified working here:
+
+| Gadget | Formatters |
+|---|---|
+| `TypeConfuseDelegateMono` | `BinaryFormatter`, `LosFormatter`, `NetDataContractSerializer` |
+
+Generating payloads for the WPF-backed gadgets needs Windows or .NET Framework.
 
 ## 🚀 Deploying to a remote Kali host
 
