@@ -78,11 +78,15 @@ def resolve_binary(name: str) -> str:
 class CommandExecutor:
     """Class to handle command execution with better timeout management"""
 
-    def __init__(self, command, timeout: int = COMMAND_TIMEOUT):
+    def __init__(self, command, timeout: int = COMMAND_TIMEOUT, stdin_data: Optional[str] = None):
         self.command = command
         self.timeout = timeout
         # Determine if we should use shell mode based on command type
         self.use_shell = isinstance(command, str)
+        # None means "no input": stdin is wired to /dev/null so an unexpectedly
+        # interactive tool hits EOF instead of blocking until the timeout. Pass a
+        # string to drive a tool that reads commands from stdin.
+        self.stdin_data = stdin_data
         self.process = None
         self.stdout_data = ""
         self.stderr_data = ""
@@ -109,12 +113,13 @@ class CommandExecutor:
             self.process = subprocess.Popen(
                 self.command,
                 shell=self.use_shell,
+                stdin=subprocess.PIPE if self.stdin_data is not None else subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1  # Line buffered
             )
-            
+
             # Start threads to read output continuously
             self.stdout_thread = threading.Thread(target=self._read_stdout)
             self.stderr_thread = threading.Thread(target=self._read_stderr)
@@ -122,7 +127,16 @@ class CommandExecutor:
             self.stderr_thread.daemon = True
             self.stdout_thread.start()
             self.stderr_thread.start()
-            
+
+            if self.stdin_data is not None:
+                # Inputs here are a few short lines, so a blocking write cannot
+                # fill the pipe buffer and deadlock against the reader threads.
+                try:
+                    self.process.stdin.write(self.stdin_data)
+                    self.process.stdin.close()
+                except (BrokenPipeError, OSError) as e:
+                    logger.warning(f"Could not write stdin to process: {e}")
+
             # Wait for the process to complete or timeout
             try:
                 self.return_code = self.process.wait(timeout=self.timeout)
@@ -184,7 +198,8 @@ def _truncate(text: str, limit: int) -> tuple:
 
 
 def execute_command(command, timeout: Optional[int] = None,
-                    max_output_bytes: Optional[int] = None) -> Dict[str, Any]:
+                    max_output_bytes: Optional[int] = None,
+                    stdin_data: Optional[str] = None) -> Dict[str, Any]:
     """
     Execute a command and return the result.
 
@@ -192,6 +207,7 @@ def execute_command(command, timeout: Optional[int] = None,
         command: The command to execute (list for safe mode, string for shell mode)
         timeout: Per-command timeout in seconds; falls back to COMMAND_TIMEOUT
         max_output_bytes: Cap on returned stdout/stderr; falls back to MAX_OUTPUT_BYTES
+        stdin_data: Text to feed the process on stdin; None wires stdin to /dev/null
 
     Returns:
         A dictionary containing the stdout, stderr, and return code
@@ -199,7 +215,7 @@ def execute_command(command, timeout: Optional[int] = None,
     effective_timeout = COMMAND_TIMEOUT if timeout is None else max(1, min(int(timeout), MAX_COMMAND_TIMEOUT))
     limit = MAX_OUTPUT_BYTES if max_output_bytes is None else int(max_output_bytes)
 
-    executor = CommandExecutor(command, timeout=effective_timeout)
+    executor = CommandExecutor(command, timeout=effective_timeout, stdin_data=stdin_data)
     result = executor.execute()
 
     result["stdout"], stdout_truncated = _truncate(result.get("stdout", ""), limit)
@@ -337,12 +353,14 @@ def tool_endpoint(tool_name: str, required_params: Optional[List[str]] = None,
                 else:
                     command, options = built, {}
 
-                runner = execute_binary_command if options.get("binary") else execute_command
-                result = runner(
-                    command,
-                    timeout=params.get("timeout") or options.get("timeout"),
-                    max_output_bytes=params.get("max_output_bytes"),
-                )
+                common = {
+                    "timeout": params.get("timeout") or options.get("timeout"),
+                    "max_output_bytes": params.get("max_output_bytes"),
+                }
+                if options.get("binary"):
+                    result = execute_binary_command(command, **common)
+                else:
+                    result = execute_command(command, stdin_data=options.get("stdin"), **common)
                 return jsonify(result)
             except ToolUnavailable as e:
                 # Same shape as a missing binary so callers handle one case.
@@ -699,6 +717,66 @@ def jsanalyzer(params):
     command = add_args(command, params.get("additional_args", ""))
     command += targets
     return command
+
+
+@app.route("/api/tools/bangbang", methods=["POST"])
+@tool_endpoint("bangbang", required_params=["target"],
+               install_hint="Install with install-tools.sh --only bangbang.")
+def bangbang(params):
+    """Search NVD for a product's CVEs, then hunt public PoCs across four forges."""
+    target = params["target"]
+    # The tool takes either a keyword or a CVE ID as its single positional arg.
+    # Reject shell-ish input early even though nothing here uses a shell.
+    if not re.match(r'^[A-Za-z0-9][A-Za-z0-9 ._+-]{0,80}$', target):
+        raise ValueError("target must be a product keyword or a CVE ID")
+
+    command = ["bangbang", target]
+
+    if params.get("max_cves"):
+        command += ["--max-cves", str(int(params["max_cves"]))]
+    if params.get("max_hits") is not None:
+        command += ["--max-hits", str(int(params["max_hits"]))]
+    if params.get("min_stars"):
+        command += ["--min-stars", str(int(params["min_stars"]))]
+    if params.get("threshold") is not None:
+        command += ["--threshold", str(int(params["threshold"]))]
+    if params.get("show_all"):
+        command.append("--show-all")
+    if params.get("sources"):
+        sources = params["sources"]
+        sources = sources if isinstance(sources, str) else ",".join(sources)
+        valid = {"gh", "glab", "cb", "edb", "github", "gitlab", "codeberg", "exploitdb"}
+        unknown = {s.strip() for s in sources.split(",") if s.strip()} - valid
+        if unknown:
+            raise ValueError(f"unknown sources: {', '.join(sorted(unknown))}")
+        command += ["--sources", sources]
+    if params.get("nvd_api_key"):
+        command += ["--nvd-api-key", params["nvd_api_key"]]
+
+    download_dir = params.get("download_dir", "")
+    if download_dir:
+        command += ["--dir", download_dir]
+
+    command = add_args(command, params.get("additional_args", ""))
+
+    # bangbang prints its results and then drops into a REPL. Its first-run
+    # wizard is TTY-gated and the REPL exits on stdin EOF, so the default
+    # stdin=/dev/null already yields a clean one-shot search. To download, drive
+    # that same REPL by feeding it commands.
+    select = params.get("select")
+    stdin_lines = []
+    if select:
+        targets = select if isinstance(select, str) else " ".join(select)
+        # Targets are "N" or "N.M" only; anything else would be a REPL command
+        # smuggled in through this field.
+        if not re.match(r'^[0-9]+(\.[0-9]+)?( +[0-9]+(\.[0-9]+)?)*$', targets.strip()):
+            raise ValueError("select must be space-separated targets like '1' or '2.3'")
+        stdin_lines += [f"select {targets.strip()}", "download"]
+    stdin_lines.append("quit")
+
+    # Searching many CVEs across four hosts is slow; NVD alone rate-limits hard
+    # without an API key.
+    return command, {"stdin": "\n".join(stdin_lines) + "\n", "timeout": 900}
 
 
 @app.route("/api/tools/webcapture", methods=["POST"])
@@ -1234,6 +1312,7 @@ EXTENDED_TOOLS = {
     "nuclei": "nuclei",
     "sslscan": "sslscan",
     "webcapture": "webcapture",
+    "bangbang": "bangbang",
 }
 
 

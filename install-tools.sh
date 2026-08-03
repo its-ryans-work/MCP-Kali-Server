@@ -23,7 +23,7 @@ OPT_DIR="$PREFIX/opt/mcp-kali"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-ALL_TOOLS=(sqlmap ffuf shcheck jsanalyzer sourcemapper trufflehog semgrep ysoserial ysoserial-net nuclei sslscan webcapture)
+ALL_TOOLS=(sqlmap ffuf shcheck jsanalyzer sourcemapper trufflehog semgrep ysoserial ysoserial-net nuclei sslscan webcapture bangbang)
 ONLY=""
 SKIP=""
 CHECK_ONLY=0
@@ -321,6 +321,32 @@ install_trufflehog() {
     fi
 }
 
+install_bangbang() {
+    # Statically linked Zig binary, no runtime dependencies. Release asset names
+    # are bangbang-linux-<arch>, which does not match trufflehog's convention, so
+    # this cannot reuse a shared helper.
+    if installed bangbang && [ "$FORCE" -eq 0 ]; then
+        RESULTS[bangbang]="present  $(command -v bangbang 2>/dev/null || echo "$BIN_DIR/bangbang")"
+        return 0
+    fi
+    local arch url
+    case "$(uname -m)" in
+        x86_64|amd64)  arch="amd64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) RESULTS[bangbang]="FAILED   no release build for $(uname -m)"; return 0 ;;
+    esac
+    url="https://github.com/its-ryans-work/bangbang/releases/latest/download/bangbang-linux-${arch}"
+    log "installing bangbang (linux-$arch)"
+    if curl -fsSL "$url" -o "$TMP_DIR/bangbang"; then
+        install -m 0755 "$TMP_DIR/bangbang" "$BIN_DIR/bangbang"
+        local ver; ver="$("$BIN_DIR/bangbang" --version 2>/dev/null | head -1)"
+        RESULTS[bangbang]="installed $BIN_DIR/bangbang${ver:+ ($ver)}"
+    else
+        RESULTS[bangbang]="FAILED   download failed: $url"
+        err "bangbang download failed"
+    fi
+}
+
 install_ysoserial() {
     # Java ysoserial: grab the fat jar and wrap it so `ysoserial` works on PATH.
     if installed ysoserial && [ "$FORCE" -eq 0 ]; then
@@ -488,6 +514,7 @@ main() {
             nuclei)       install_nuclei ;;
             sslscan)      install_sslscan ;;
             webcapture)   install_webcapture ;;
+            bangbang)     install_bangbang ;;
         esac
     done
 

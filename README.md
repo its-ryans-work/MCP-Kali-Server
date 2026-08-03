@@ -23,7 +23,7 @@ As a result, this is able to perform **AI-assisted penetration testing** and sol
 
 ## 🧰 Added Tooling
 
-This fork adds twelve tools on top of upstream. Each has a dedicated API endpoint and MCP tool with
+This fork adds thirteen tools on top of upstream. Each has a dedicated API endpoint and MCP tool with
 typed parameters, so the model does not have to build command lines by hand.
 
 | Tool | MCP tool | What it covers |
@@ -40,6 +40,7 @@ typed parameters, so the model does not have to build command lines by hand.
 | [Nuclei](https://github.com/projectdiscovery/nuclei) | `nuclei_scan` | Template-driven vulnerability scanning |
 | [sslscan](https://github.com/rbsec/sslscan) | `sslscan_scan` | TLS versions, ciphers, certificates and known weaknesses |
 | [Playwright](https://github.com/microsoft/playwright) | `web_capture` | Renders a page in real Chromium: post-JS DOM, network log, loaded scripts, console, cookie flags, storage, screenshot |
+| [bangbang](https://github.com/its-ryans-work/bangbang) | `bangbang_search` | Finds a product's CVEs on NVD, then hunts GitHub/GitLab/Codeberg/exploit-db for public PoCs, and can clone them |
 
 These chain naturally. A typical run on a single-page app:
 
@@ -51,7 +52,11 @@ web_capture (wait_until=networkidle)   -> discovers dynamically injected bundles
   -> semgrep_scan / trufflehog_scan    -> vulnerabilities and credentials in that source
 ```
 
-### Notes on three of them
+`bangbang_search` covers the other direction — starting from a product or CVE rather than from a live
+target. Group numbers in its output (`1`, `1.2`) feed its own `select` parameter to clone a PoC, which
+`semgrep_scan` or `trufflehog_scan` can then read. Cloned PoC code is untrusted and is never executed.
+
+### Notes on four of them
 
 **JS Analyzer** is upstream a Burp Suite extension (Jython + Swing) with no CLI, so it cannot be shelled
 out to. This fork ships a headless port at [`tools/jsanalyzer.py`](tools/jsanalyzer.py) that reuses its
@@ -62,6 +67,13 @@ webpack chunk hash — so they are gated behind `include_low_confidence`.
 **ysoserial payloads are binary**, not text: a Java payload begins with the bytes `AC ED 00 05` and is not
 valid UTF-8. Both payload endpoints therefore return `stdout_base64` (with a `stdout_bytes` length)
 rather than `stdout`. Decode before sending onward.
+
+**bangbang is a REPL, driven here without one.** It prints results and then drops into an interactive
+prompt. That suits an API better than it looks: its first-run auth wizard is TTY-gated, its REPL exits
+on stdin EOF, and it drops ANSI colour when stdout is not a TTY — so with stdin at `/dev/null` a search
+is already a clean one-shot command. Downloads reuse the same channel, feeding `select N` and
+`download` on stdin. Because of that, the server now wires **every** tool's stdin to `/dev/null` by
+default; any tool that unexpectedly prompts hits EOF instead of blocking until its timeout.
 
 **Playwright is installed into its own venv**, not from apt. Kali packages `python3-playwright` as a `+ds`
 build with the bundled Node driver removed — it expects `/usr/share/nodejs/playwright/cli.js` from the

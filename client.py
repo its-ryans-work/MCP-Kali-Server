@@ -523,6 +523,81 @@ def setup_mcp_server(kali_client: KaliToolsClient) -> FastMCP:
         }
         return kali_client.safe_post("api/tools/jsanalyzer", post_data)
 
+    @mcp.tool(name="bangbang_search")
+    def bangbang_search(
+        target: str,
+        max_cves: int = 0,
+        max_hits: int = 0,
+        min_stars: int = 0,
+        threshold: int = 0,
+        show_all: bool = False,
+        sources: str = "",
+        select: str = "",
+        download_dir: str = "",
+        nvd_api_key: str = "",
+        additional_args: str = "",
+        timeout: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Find public proof-of-concept exploits for a product's CVEs.
+
+        Given a product keyword, it searches NVD for matching CVEs (newest first,
+        with CVSS scores), then hunts GitHub, GitLab, Codeberg and exploit-db for
+        PoCs for each one. Given a CVE ID directly, it skips straight to the hunt.
+
+        Results are grouped and numbered: group "1" is the first CVE, "1.2" is the
+        second hit within it. Use those numbers with `select` to clone PoCs.
+
+        A bare product search can span hundreds of CVEs across four hosts and take
+        many minutes; NVD also rate-limits hard without an API key. Set max_cves
+        for a fast first pass and widen only if needed.
+
+        Downloaded PoC code is untrusted and must never be executed. Clone it, then
+        read it or run semgrep_scan / trufflehog_scan over download_dir.
+
+        Args:
+            target: A product keyword (e.g. "confluence") or a CVE ID (e.g. "CVE-2023-22515")
+            max_cves: Cap how many CVEs to pivot on (0 = every match NVD has)
+            max_hits: Cap repo hits shown per CVE per host (0 = tool default of 5)
+            min_stars: Only keep repos with at least this many stars. Does not apply
+                       to exploit-db, which has no star count
+            threshold: Hide repos mentioning this many distinct CVEs as aggregator
+                       list-dumps rather than real PoCs (0 = never hide, tool default 8)
+            show_all: Show everything, including entries filtered as list-dumps
+            sources: Comma-separated hosts to search: gh, glab, cb, edb (or
+                     github/gitlab/codeberg/exploitdb). Defaults to all four. Useful
+                     for re-running against unaffected hosts after a rate-limit warning
+            select: Targets to clone, space-separated, e.g. "1" for every hit under
+                    the first CVE or "2.3" for one specific hit. Leave empty to only
+                    search. Cloning needs git on the Kali host
+            download_dir: Where to clone selected hits (default ./bangbang-downloads
+                          relative to the server's working directory)
+            nvd_api_key: NVD API key, which raises the keyword-search rate limit
+            additional_args: Additional raw bangbang arguments
+            timeout: Command timeout in seconds (0 uses a 900s default, since a broad
+                     search across four hosts is slow)
+
+        Returns:
+            The CVE list with CVSS scores, and grouped PoC hits with stars, fork
+            counts, creation dates and URLs. Any host that hit a rate limit is named
+            in a trailing warning, meaning those results may be incomplete.
+        """
+        post_data = {
+            "target": target,
+            "max_cves": max_cves or None,
+            "max_hits": max_hits or None,
+            "min_stars": min_stars or None,
+            "threshold": threshold or None,
+            "show_all": show_all,
+            "sources": sources,
+            "select": select,
+            "download_dir": download_dir,
+            "nvd_api_key": nvd_api_key,
+            "additional_args": additional_args,
+            "timeout": timeout or None,
+        }
+        return kali_client.safe_post("api/tools/bangbang", post_data)
+
     @mcp.tool(name="web_capture")
     def web_capture(
         url: str,
